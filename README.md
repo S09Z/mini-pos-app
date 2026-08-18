@@ -2,10 +2,12 @@
 
 Offline-first POS for a small matcha stall, running as a PWA on iPad.
 
-The domain layer — Thai VAT and delivery-platform commission (GP) logic — is
-pure, tested functions with no I/O and no framework dependency. Phase 1 adds
-the sell screen on top of it: Vite + React + Tailwind, a local Dexie
-(IndexedDB) store, and the cash-tender/void flow, all offline-first.
+The domain layer — Thai VAT, delivery-platform commission (GP), and stock —
+is pure, tested functions with no I/O and no framework dependency. Phase 1
+adds the sell screen on top of it: Vite + React + Tailwind, a local Dexie
+(IndexedDB) store, and the cash-tender/void flow, all offline-first. Phase 2
+adds ingredient stock: recipes, depletion on sale, waste, purchases, and
+low-stock/sold-out states derived from what is actually in the tins.
 
 Built deliberately from the inside out: the money and tax rules are the part
 that is expensive to get wrong and cheap to test, so they land first.
@@ -30,9 +32,10 @@ pnpm dev                   # sell screen at http://localhost:5173
 | `pnpm typecheck` | `tsc --noEmit` |
 | `pnpm check` | Typecheck + tests — use this as the CI gate |
 
-Current status: **71 tests across 4 domain files, typecheck clean. Phase 1
-sell/tender/void screens built and manually verified; not yet run on a real
-trading day** (see `PLAN.md`'s Phase 1 "done when").
+Current status: **185 tests across 9 domain files, typecheck clean. Phases 1
+and 2 built and manually verified in-browser; neither has met its "done when"
+yet** — Phase 1 needs a full trading day, Phase 2 needs a physical count that
+matches twice in a row. Both bars are met at the counter, not in this repo.
 
 `.npmrc` sets `strict-peer-dependencies` and disables `auto-install-peers`, so
 a missing peer fails the install rather than resolving to something unexpected
@@ -58,8 +61,14 @@ src/
 ├── channel/
 │   ├── types.ts          Channel / GP / per-channel price / recipe override schema
 │   └── settlement.ts     Commission, payout, contribution margin, break-even price
-├── db/                   Dexie schema, receipt numbering, checkout, void — Phase 1
-├── ui/                   Sell screen components — Phase 1
+├── stock/
+│   ├── units.ts          Branded Quantity integer type (milli-units), safe arithmetic
+│   ├── recipe.ts         Bill of materials, per-channel override resolution
+│   ├── ledger.ts         Append-only movements; on-hand derived, never edited
+│   ├── costing.ts        Weighted-average unit cost, COGS, stock value
+│   └── availability.ts   Recipe × stock → low / sold-out per menu item
+├── db/                   Dexie schema, receipts, checkout, void, stock ops
+├── ui/                   Sell and Stock screen components
 └── App.tsx               Screen state machine: sell → tender → done
 ```
 
@@ -144,9 +153,16 @@ difference is material.
 
 Phase 0 (domain layer) is complete, with tests. Phase 1 (Dexie schema + sell
 screen) is built: tap item → cart → cash tender → change due → done, plus
-void with owner PIN. What's left before Phase 1 is genuinely *done* is
-real-world use — PLAN.md's bar is a full trading day without reaching for
-the notebook, which only happens at the counter, not in this repo.
+void with owner PIN. Phase 2 (stock) is built: ingredients and recipes,
+depletion inside the sale transaction, waste and purchase entry, physical
+counts recorded as variances, and menu tiles that go low and sold-out from
+real ingredient levels.
+
+Neither phase is *done* in PLAN.md's sense. Phase 1's bar is a full trading
+day without reaching for the notebook; Phase 2's is a physical count matching
+the app twice in a row. Both are met at the counter, not in this repo — and
+PLAN.md is explicit that building further before that feedback arrives is how
+you get modules that are wrong in ways you cannot predict from a chair.
 
 See `PLAN.md` for all nine phases, what each one deliberately excludes, and
 the "done when" test for each. See `DESIGN.md` before building any UI.
@@ -158,9 +174,14 @@ requirements, and withholding tax treatment depend on Revenue Department
 practice and your legal form. Have a Thai accountant review the invoice layout
 and your first PP.30 before relying on any of this.
 
-`db/sales.ts`, `db/voids.ts`, and `db/receipts.ts` coordinate Dexie writes
-around the (fully tested) domain layer. They were verified manually — full
-sell → tender → done → void flow, checked against the real IndexedDB records
-in-browser — rather than with an automated suite, since that would need a
-fake-IndexedDB dev dependency not yet approved. Worth adding before this
-layer grows further.
+Everything under `src/db/` coordinates Dexie writes around the (fully tested)
+domain layer. It was verified manually — sell → tender → done → void, plus
+waste, purchase, and count entry, each checked against the real IndexedDB
+records in-browser — rather than with an automated suite, since that needs a
+fake-IndexedDB dev dependency not yet approved. This gap has now grown to
+cover the stock write path too, and is worth closing.
+
+Stock note: `ingredients.onHand` is a cached projection; `stock_movements` is
+the source of truth. `recomputeOnHand()` rebuilds the cache from the ledger
+and reports any disagreement — run it before trusting a physical count, so a
+cache bug is never mistaken for a missing gram of matcha.

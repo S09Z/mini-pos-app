@@ -9,6 +9,7 @@
 
 import { db, type VoidRecord } from "./schema.js";
 import { nextReceiptNumber } from "./receipts.js";
+import { restockForVoid } from "./stock.js";
 
 export class VoidError extends Error {
   override readonly name = "VoidError";
@@ -32,6 +33,13 @@ export async function voidSale(saleId: string, enteredPin: string): Promise<Void
     receiptNo,
     createdAt: new Date().toISOString(),
   };
-  await db.voids.add(record);
+
+  // The void record and the compensating stock movements land together, for
+  // the same reason the sale and its depletion do.
+  await db.transaction("rw", db.voids, db.ingredients, db.stock_movements, async () => {
+    await db.voids.add(record);
+    await restockForVoid(saleId, record.createdAt);
+  });
+
   return record;
 }
