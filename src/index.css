@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #16180f;
+  --paper: #f2f3ee;
+  --rule: #d6d8ce;
+  --matcha: #6f8f1f;
+  --koicha: #2e3d14;
+  --beni: #b33a2b;
+  --kincha: #c08a1e;
+
+  --font-display: "Archivo", "Arial Narrow", sans-serif;
+  --font-ui: "IBM Plex Sans Thai Looped", "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+@theme {
+  --color-ink: var(--ink);
+  --color-paper: var(--paper);
+  --color-rule: var(--rule);
+  --color-matcha: var(--matcha);
+  --color-koicha: var(--koicha);
+  --color-beni: var(--beni);
+  --color-kincha: var(--kincha);
+
+  --font-display: var(--font-display);
+  --font-ui: var(--font-ui);
+  --font-mono: var(--font-mono);
+
+  --text-11: 11pt;
+  --text-13: 13pt;
+  --text-15: 15pt;
+  --text-18: 18pt;
+  --text-24: 24pt;
+  --text-34: 34pt;
+  --text-88: 88pt;
+
+  --radius-tile: 4pt;
+  --spacing-1: 4pt;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@keyframes scoreboard-roll-in {
+  from {
+    transform: translateY(0.5em);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.scoreboard-roll {
+  animation: scoreboard-roll-in 90ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes scoreboard-roll-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
