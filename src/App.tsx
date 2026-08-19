@@ -10,10 +10,13 @@ import {
   recordPurchase,
   recordCount,
 } from "./db/stock.js";
+import { buildDayView, loadDayData, recordCashCount, tradingDays } from "./db/day.js";
+import { bangkokToday } from "./day/period.js";
+import { salesCsv, saleLinesCsv, daySummaryCsv } from "./day/csv.js";
 import { menuStockByItem } from "./stock/availability.js";
 import { quantity } from "./stock/units.js";
 import { stockStatus } from "./stock/ledger.js";
-import type { Satang } from "./money.js";
+import { satang, type Satang } from "./money.js";
 import { useLiveQuery } from "./ui/useLiveQuery.js";
 import { RailNav, type Tab } from "./ui/RailNav.js";
 import { MenuGrid } from "./ui/MenuGrid.js";
@@ -22,6 +25,8 @@ import { CashTenderScreen } from "./ui/CashTenderScreen.js";
 import { DoneScreen } from "./ui/DoneScreen.js";
 import { VoidDialog } from "./ui/VoidDialog.js";
 import { StockScreen, type StockActions } from "./ui/StockScreen.js";
+import { DayScreen, type DayActions } from "./ui/DayScreen.js";
+import { downloadText } from "./ui/download.js";
 
 type Screen = { name: "sell" } | { name: "tender" } | { name: "done"; sale: SaleRecord };
 
@@ -31,6 +36,7 @@ export function App() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [screen, setScreen] = useState<Screen>({ name: "sell" });
   const [voiding, setVoiding] = useState<SaleRecord | null>(null);
+  const [day, setDay] = useState(() => bangkokToday());
 
   useEffect(() => {
     seedIfEmpty()
@@ -60,6 +66,10 @@ export function App() {
       names: new Map(allIngredients.map((i) => [i.id, i.name])),
     };
   }, [ready]);
+
+  // Re-reads whenever a sale, void, or cash count lands.
+  const dayView = useLiveQuery(() => (ready ? buildDayView(day) : null), [ready, day]);
+  const days = useLiveQuery(() => (ready ? tradingDays() : []), [ready]);
 
   const total = useMemo(
     () => cart.reduce((acc, l) => acc + l.unitPriceSatang * l.qty, 0) as Satang,
@@ -120,6 +130,50 @@ export function App() {
     [],
   );
 
+  const dayActions: DayActions = useMemo(
+    () => ({
+      recordCount: async (expected, declared, note) => {
+        await recordCashCount(day, expected, declared, note);
+      },
+      exportCsv: async (forDay) => {
+        const [{ sales, lines }, view] = await Promise.all([
+          loadDayData(forDay),
+          buildDayView(forDay),
+        ]);
+        const voidedSaleIds = new Set(view.report.voids.map((v) => v.saleId));
+        const { totals } = view.report;
+
+        // Three files rather than one: an accountant wants the detail and the
+        // headline in separate sheets, and mixing schemas in one CSV is what
+        // produces follow-up questions.
+        downloadText(`${forDay}-summary.csv`, daySummaryCsv({
+          day: forDay,
+          gross: totals.gross,
+          net: totals.net,
+          vat: totals.vat,
+          costOfGoods: totals.costOfGoods,
+          contribution: totals.contribution,
+          contributionMarginBp: totals.contributionMarginBp,
+          costComplete: totals.costComplete,
+          uncostedLines: totals.uncostedLines,
+          saleCount: totals.saleCount,
+          itemCount: totals.itemCount,
+          voidCount: totals.voidCount,
+          voidedValue: totals.voidedValue,
+          expectedCash: view.report.expectedCash,
+          declaredCash: view.cashCount === null ? null : satang(view.cashCount.declaredSatang),
+          cashVariance: view.cashCount === null ? null : satang(view.cashCount.varianceSatang),
+        }));
+        setTimeout(() => downloadText(`${forDay}-sales.csv`, salesCsv(sales, voidedSaleIds)), 300);
+        setTimeout(
+          () => downloadText(`${forDay}-sale-lines.csv`, saleLinesCsv(sales, lines, voidedSaleIds)),
+          600,
+        );
+      },
+    }),
+    [day],
+  );
+
   async function handleConfirmTender(tendered: Satang) {
     const { sale } = await checkout(cart, tendered);
     setScreen({ name: "done", sale });
@@ -154,6 +208,19 @@ export function App() {
       />
 
       {tab === "stock" && <StockScreen ingredients={ingredients ?? []} actions={stockActions} />}
+
+      {tab === "day" &&
+        (dayView == null ? (
+          <div className="flex flex-1 items-center justify-center text-15 opacity-60">Loading…</div>
+        ) : (
+          <DayScreen
+            view={dayView}
+            day={day}
+            days={days ?? []}
+            onSelectDay={setDay}
+            actions={dayActions}
+          />
+        ))}
 
       {tab === "sell" && screen.name === "sell" && (
         <>

@@ -12,7 +12,11 @@ import { rateAt } from "../tax/rates.js";
 import { computeDocumentVat, type DocumentLineInput } from "../tax/vat.js";
 import { db, type SaleRecord, type SaleLineRecord } from "./schema.js";
 import { nextReceiptNumber } from "./receipts.js";
-import { depleteForSale } from "./stock.js";
+import { depleteForSale, unitCostMap } from "./stock.js";
+import { resolveRecipe } from "../stock/recipe.js";
+import { costOfGoods } from "../stock/costing.js";
+import { scaleQty } from "../stock/units.js";
+import { WALK_IN } from "../channel/types.js";
 
 export class CheckoutError extends Error {
   override readonly name = "CheckoutError";
@@ -74,8 +78,23 @@ export async function checkout(
     changeSatang: sub(tenderedSatang, doc.gross),
   };
 
+  // Cost is frozen here, at today's weighted average, for the same reason the
+  // VAT rate is: a report re-run next month must reproduce this day's margin
+  // rather than restate it at whatever matcha costs by then.
+  const [recipeLines, costs] = await Promise.all([db.recipe_lines.toArray(), unitCostMap()]);
+
   const lines: SaleLineRecord[] = cart.map((cartLine, i) => {
     const docLine = doc.lines[i]!;
+    const recipe = resolveRecipe(recipeLines, cartLine.menuItemId, WALK_IN.id);
+    // An item with no recipe is uncosted, not free — see SaleLineRecord.
+    const cogsSatang =
+      recipe.length === 0
+        ? null
+        : costOfGoods(
+            recipe.map((req) => ({ ingredientId: req.ingredientId, qty: scaleQty(req.qty, cartLine.qty) })),
+            costs,
+          );
+
     return {
       id: crypto.randomUUID(),
       saleId,
@@ -86,6 +105,7 @@ export async function checkout(
       grossSatang: docLine.gross,
       netSatang: docLine.net,
       vatSatang: docLine.vat,
+      cogsSatang,
     };
   });
 

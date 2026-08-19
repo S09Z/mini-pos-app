@@ -7,7 +7,9 @@ is pure, tested functions with no I/O and no framework dependency. Phase 1
 adds the sell screen on top of it: Vite + React + Tailwind, a local Dexie
 (IndexedDB) store, and the cash-tender/void flow, all offline-first. Phase 2
 adds ingredient stock: recipes, depletion on sale, waste, purchases, and
-low-stock/sold-out states derived from what is actually in the tins.
+low-stock/sold-out states derived from what is actually in the tins. Phase 3
+closes the day: a Z-report led by contribution, cash reconciliation, a void
+audit, and a CSV export for the accountant.
 
 Built deliberately from the inside out: the money and tax rules are the part
 that is expensive to get wrong and cheap to test, so they land first.
@@ -32,10 +34,11 @@ pnpm dev                   # sell screen at http://localhost:5173
 | `pnpm typecheck` | `tsc --noEmit` |
 | `pnpm check` | Typecheck + tests — use this as the CI gate |
 
-Current status: **185 tests across 9 domain files, typecheck clean. Phases 1
-and 2 built and manually verified in-browser; neither has met its "done when"
-yet** — Phase 1 needs a full trading day, Phase 2 needs a physical count that
-matches twice in a row. Both bars are met at the counter, not in this repo.
+Current status: **310 tests across 14 domain files, typecheck clean. Phases 1,
+2 and 3 built and manually verified in-browser; none has met its "done when"
+yet** — Phase 1 needs a full trading day, Phase 2 a physical count matching
+twice in a row, Phase 3 an accountant reviewing the export without follow-up
+questions. All three bars are met outside this repo.
 
 `.npmrc` sets `strict-peer-dependencies` and disables `auto-install-peers`, so
 a missing peer fails the install rather than resolving to something unexpected
@@ -67,8 +70,14 @@ src/
 │   ├── ledger.ts         Append-only movements; on-hand derived, never edited
 │   ├── costing.ts        Weighted-average unit cost, COGS, stock value
 │   └── availability.ts   Recipe × stock → low / sold-out per menu item
-├── db/                   Dexie schema, receipts, checkout, void, stock ops
-├── ui/                   Sell and Stock screen components
+├── day/
+│   ├── period.ts         Bangkok-local trading day bounds (+07:00, no DST)
+│   ├── zreport.ts        Day totals led by contribution, by hour, by item
+│   ├── drawer.ts         Denomination tally, reconciliation, plain variance
+│   ├── voidaudit.ts      Voids grouped by actor, clustering flags
+│   └── csv.ts            RFC 4180 export with formula-injection guard
+├── db/                   Dexie schema, receipts, checkout, void, stock, day
+├── ui/                   Sell, Stock, and Day screen components
 └── App.tsx               Screen state machine: sell → tender → done
 ```
 
@@ -158,11 +167,17 @@ depletion inside the sale transaction, waste and purchase entry, physical
 counts recorded as variances, and menu tiles that go low and sold-out from
 real ingredient levels.
 
-Neither phase is *done* in PLAN.md's sense. Phase 1's bar is a full trading
-day without reaching for the notebook; Phase 2's is a physical count matching
-the app twice in a row. Both are met at the counter, not in this repo — and
-PLAN.md is explicit that building further before that feedback arrives is how
-you get modules that are wrong in ways you cannot predict from a chair.
+Phase 3 (day close) is built: a Z-report structured so contribution leads and
+revenue is subordinate, drawer reconciliation by denomination with the
+variance kept as its own event, a void audit that flags clustering, and a
+three-file CSV export.
+
+No phase is *done* in PLAN.md's sense. Phase 1's bar is a full trading day
+without reaching for the notebook; Phase 2's is a physical count matching the
+app twice in a row; Phase 3's is an accountant reading the export and asking
+nothing. All are met outside this repo — and PLAN.md is explicit that building
+further before that feedback arrives is how you get modules that are wrong in
+ways you cannot predict from a chair.
 
 See `PLAN.md` for all nine phases, what each one deliberately excludes, and
 the "done when" test for each. See `DESIGN.md` before building any UI.

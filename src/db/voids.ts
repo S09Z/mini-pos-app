@@ -32,6 +32,7 @@ export async function voidSale(saleId: string, enteredPin: string): Promise<Void
     saleId,
     receiptNo,
     createdAt: new Date().toISOString(),
+    actor: "owner",
   };
 
   // The void record and the compensating stock movements land together, for

@@ -3,7 +3,7 @@ export type Tab = "sell" | "stock" | "day" | "settings";
 const TABS: readonly { key: Tab; glyph: string; label: string; enabled: boolean }[] = [
   { key: "sell", glyph: "▣", label: "Sell", enabled: true },
   { key: "stock", glyph: "▤", label: "Stock", enabled: true },
-  { key: "day", glyph: "▥", label: "Day", enabled: false },
+  { key: "day", glyph: "▥", label: "Day", enabled: true },
   { key: "settings", glyph: "▦", label: "Settings", enabled: false },
 ];
 
