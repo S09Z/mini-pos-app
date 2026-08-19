@@ -7,18 +7,27 @@ export function Ticket({
   onIncrement,
   onDecrement,
   onCharge,
+  channelName,
+  /** Delivery orders are settled by the platform — there is no cash to tender. */
+  isDelivery = false,
+  blockedReason,
 }: {
   cart: readonly CartLine[];
   onIncrement: (menuItemId: string) => void;
   onDecrement: (menuItemId: string) => void;
   onCharge: () => void;
+  channelName?: string;
+  isDelivery?: boolean;
+  blockedReason?: string;
 }) {
   const total = sum(cart.map((l) => (l.unitPriceSatang * l.qty) as Satang));
   const empty = cart.length === 0;
 
   return (
     <aside className="flex h-full w-[400pt] flex-col border-l border-rule">
-      <h2 className="border-b border-rule p-4 text-13 tracking-wide">TICKET</h2>
+      <h2 className="border-b border-rule p-4 text-13 tracking-wide">
+        TICKET{channelName !== undefined && isDelivery ? ` · ${channelName.toUpperCase()}` : ""}
+      </h2>
 
       <div className="flex-1 overflow-y-auto">
         {empty ? (
@@ -72,12 +81,17 @@ export function Ticket({
         </div>
         <button
           type="button"
-          disabled={empty}
+          disabled={empty || blockedReason !== undefined}
           onClick={onCharge}
           className="h-[72pt] w-full rounded-[4pt] bg-ink text-18 font-medium text-paper disabled:opacity-30"
         >
-          Charge {formatTHB(total)}
+          {/* The button names the outcome. A delivery order is recorded, not
+              charged — the platform already took the customer's money. */}
+          {isDelivery ? `Record ${formatTHB(total)} order` : `Charge ${formatTHB(total)}`}
         </button>
+        {blockedReason !== undefined && (
+          <p className="mt-2 text-13 text-beni">{blockedReason}</p>
+        )}
       </div>
     </aside>
   );

@@ -34,11 +34,12 @@ pnpm dev                   # sell screen at http://localhost:5173
 | `pnpm typecheck` | `tsc --noEmit` |
 | `pnpm check` | Typecheck + tests — use this as the CI gate |
 
-Current status: **310 tests across 14 domain files, typecheck clean. Phases 1,
-2 and 3 built and manually verified in-browser; none has met its "done when"
+Current status: **349 tests across 16 domain files, typecheck clean. Phases 1
+through 4 built and manually verified in-browser; none has met its "done when"
 yet** — Phase 1 needs a full trading day, Phase 2 a physical count matching
 twice in a row, Phase 3 an accountant reviewing the export without follow-up
-questions. All three bars are met outside this repo.
+questions, Phase 4 a real answer to "should I raise my Grab price". All four
+bars are met outside this repo.
 
 `.npmrc` sets `strict-peer-dependencies` and disables `auto-install-peers`, so
 a missing peer fails the install rather than resolving to something unexpected
@@ -63,7 +64,9 @@ src/
 │   └── vat.ts            Inclusive extraction, document VAT, registration watchdog
 ├── channel/
 │   ├── types.ts          Channel / GP / per-channel price / recipe override schema
-│   └── settlement.ts     Commission, payout, contribution margin, break-even price
+│   ├── settlement.ts     Commission, payout, contribution margin, break-even price
+│   ├── pricing.ts        Dated per-channel list price, counter price as fallback
+│   └── analysis.ts       Contribution by channel; answers "raise my Grab price?"
 ├── stock/
 │   ├── units.ts          Branded Quantity integer type (milli-units), safe arithmetic
 │   ├── recipe.ts         Bill of materials, per-channel override resolution
@@ -172,12 +175,25 @@ revenue is subordinate, drawer reconciliation by denomination with the
 variance kept as its own event, a void audit that flags clustering, and a
 three-file CSV export.
 
+Phase 4 (delivery channels) is built: a channel switch that repriced the whole
+grid and inverts the screen so a delivery order cannot be rung at counter
+prices, manual platform-order entry, delivery packaging via the channel recipe
+override, commission frozen onto each order, contribution by channel, and a
+break-even price for every delivery item.
+
 No phase is *done* in PLAN.md's sense. Phase 1's bar is a full trading day
 without reaching for the notebook; Phase 2's is a physical count matching the
 app twice in a row; Phase 3's is an accountant reading the export and asking
-nothing. All are met outside this repo — and PLAN.md is explicit that building
-further before that feedback arrives is how you get modules that are wrong in
-ways you cannot predict from a chair.
+nothing; Phase 4's is answering "should I raise my Grab price" with a number
+you act on. All are met outside this repo — and PLAN.md is explicit that
+building further before that feedback arrives is how you get modules that are
+wrong in ways you cannot predict from a chair.
+
+**Before trusting any delivery figure, set `gpBasis` and `gpAppliesTo` from
+your actual contract.** They default to the harsher reading — commission on
+the VAT-inclusive list price, charged before merchant-funded discounts — and
+PLAN.md names trusting that default as this phase's risk. Every per-channel
+figure states the reading it was computed under.
 
 See `PLAN.md` for all nine phases, what each one deliberately excludes, and
 the "done when" test for each. See `DESIGN.md` before building any UI.

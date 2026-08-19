@@ -1,17 +1,35 @@
 import { formatTHB, type Satang } from "../money.js";
 import type { MenuItemRecord } from "../db/schema.js";
 import type { MenuItemStock } from "../stock/availability.js";
+import type { ResolvedPrice } from "../channel/pricing.js";
 
 export function MenuGrid({
   items,
   stock,
+  prices,
   ingredientNames,
   onSelect,
+  warnOnCounterPrice = false,
+  disabled = false,
 }: {
   items: readonly MenuItemRecord[];
   stock: ReadonlyMap<string, MenuItemStock>;
+  /** Channel-resolved prices. Falls back to the counter price, flagged. */
+  prices: ReadonlyMap<string, ResolvedPrice>;
   ingredientNames: ReadonlyMap<string, string>;
-  onSelect: (item: MenuItemRecord) => void;
+  onSelect: (item: MenuItemRecord, price: Satang) => void;
+  /**
+   * Only true on a delivery channel. At the counter the counter price *is*
+   * the right price, and a warning that fires when nothing is wrong teaches
+   * the operator to ignore warnings — the failure DESIGN.md calls out.
+   */
+  warnOnCounterPrice?: boolean;
+  /**
+   * True while the price map is still catching up with a channel switch.
+   * Tapping in that window would capture the previous channel's price into
+   * the cart, so the grid refuses rather than ringing the wrong amount.
+   */
+  disabled?: boolean;
 }) {
   return (
     <div className="grid flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(160pt,1fr))] gap-4 overflow-y-auto p-6">
@@ -25,12 +43,19 @@ export function MenuGrid({
         const limiting = itemStock?.limitingIngredientId;
         const limitingName = limiting === undefined || limiting === null ? null : ingredientNames.get(limiting) ?? limiting;
 
+        const resolved = prices.get(item.id);
+        const price = (resolved?.price ?? item.priceSatang) as Satang;
+        // On a delivery channel with no channel price on file, the counter
+        // price is very often a loss at 30% GP — and nothing else on the tile
+        // would reveal it.
+        const usingCounterPrice = warnOnCounterPrice && resolved?.fellBackToBase === true;
+
         return (
           <button
             key={item.id}
             type="button"
-            disabled={soldOut}
-            onClick={() => onSelect(item)}
+            disabled={soldOut || disabled}
+            onClick={() => onSelect(item, price)}
             className={[
               "flex min-h-[160pt] flex-col items-start justify-end gap-2 rounded-[4pt] border border-rule p-4 text-left",
               "active:bg-koicha active:text-paper active:transition-none",
@@ -56,8 +81,13 @@ export function MenuGrid({
               className={["text-24 text-matcha", soldOut ? "line-through decoration-ink" : ""].join(" ")}
               style={{ fontFamily: "var(--font-display)", fontVariantNumeric: "tabular-nums" }}
             >
-              {formatTHB(item.priceSatang as Satang)}
+              {formatTHB(price)}
             </span>
+            {usingCounterPrice && (
+              <span className="rounded-[4pt] bg-kincha px-1 text-11 text-paper">
+                Counter price — no channel price set
+              </span>
+            )}
           </button>
         );
       })}
