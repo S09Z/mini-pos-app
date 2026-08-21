@@ -29,8 +29,17 @@ import { DoneScreen } from "./ui/DoneScreen.js";
 import { VoidDialog } from "./ui/VoidDialog.js";
 import { StockScreen, type StockActions } from "./ui/StockScreen.js";
 import { DayScreen, type DayActions } from "./ui/DayScreen.js";
+import { PayoutsScreen, type PayoutActions } from "./ui/PayoutsScreen.js";
 import { ChannelBar } from "./ui/ChannelBar.js";
 import { downloadText } from "./ui/download.js";
+import {
+  allBatches,
+  buildBatchView,
+  importStatement,
+  recordDeposit,
+  reopenException,
+  resolveException,
+} from "./db/payouts.js";
 
 type Screen = { name: "sell" } | { name: "tender" } | { name: "done"; sale: SaleRecord };
 
@@ -45,6 +54,7 @@ export function App() {
   const [platformOrderId, setPlatformOrderId] = useState("");
   /** A refused checkout has to be visible; silently doing nothing is worse than the error. */
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [batchId, setBatchId] = useState<string | null>(null);
 
   useEffect(() => {
     seedIfEmpty()
@@ -116,6 +126,33 @@ export function App() {
 
   const activeChannel = channels?.find((c) => c.id === channelId);
   const isDelivery = channelId !== WALK_IN.id;
+
+  const batches = useLiveQuery(() => (ready ? allBatches() : []), [ready]);
+  // Default to the newest batch, but follow the operator's choice once made.
+  const activeBatchId = batchId ?? batches?.[0]?.id ?? null;
+  const batchView = useLiveQuery(
+    () => (ready && activeBatchId !== null ? buildBatchView(activeBatchId) : null),
+    [ready, activeBatchId],
+  );
+
+  const payoutActions: PayoutActions = useMemo(
+    () => ({
+      importStatement: async (forChannel, fileName, text) => {
+        const { batchId: created } = await importStatement(forChannel, fileName, text);
+        setBatchId(created);
+      },
+      resolveException: async (exceptionId, reason, note) => {
+        await resolveException(exceptionId, reason, note);
+      },
+      reopenException: async (exceptionId) => {
+        await reopenException(exceptionId);
+      },
+      recordDeposit: async (forBatch, deposit) => {
+        await recordDeposit(forBatch, deposit);
+      },
+    }),
+    [],
+  );
 
   /** Surfaced on the rail so a low tin is visible from the sell screen. */
   const stockAlert = useMemo(() => {
@@ -271,6 +308,17 @@ export function App() {
       />
 
       {tab === "stock" && <StockScreen ingredients={ingredients ?? []} actions={stockActions} />}
+
+      {tab === "payouts" && (
+        <PayoutsScreen
+          channels={channels ?? []}
+          batches={batches ?? []}
+          view={batchView ?? null}
+          selectedBatchId={activeBatchId}
+          onSelectBatch={setBatchId}
+          actions={payoutActions}
+        />
+      )}
 
       {tab === "day" &&
         (dayView == null ? (
