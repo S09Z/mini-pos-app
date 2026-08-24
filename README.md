@@ -2,10 +2,10 @@
 
 Offline-first POS for a small matcha stall, running as a PWA on iPad.
 
-This repository currently contains the **domain layer** — Thai VAT and
-delivery-platform commission (GP) logic as pure, tested functions with no I/O
-and no framework dependency. The UI, local database, and sync layers build on
-top of it.
+The domain layer — Thai VAT and delivery-platform commission (GP) logic — is
+pure, tested functions with no I/O and no framework dependency. Phase 1 adds
+the sell screen on top of it: Vite + React + Tailwind, a local Dexie
+(IndexedDB) store, and the cash-tender/void flow, all offline-first.
 
 Built deliberately from the inside out: the money and tax rules are the part
 that is expensive to get wrong and cheap to test, so they land first.
@@ -18,16 +18,21 @@ Requires Node 20+ and [pnpm](https://pnpm.io/installation).
 corepack enable            # pnpm ships with Node — no global install needed
 pnpm install
 pnpm check                 # typecheck + tests
+pnpm dev                   # sell screen at http://localhost:5173
 ```
 
 | Command | Does |
 |---|---|
+| `pnpm dev` | Vite dev server |
+| `pnpm build` | Production build (PWA, installable to a Home Screen) |
 | `pnpm test` | Run the suite once |
 | `pnpm test:watch` | Re-run on change |
 | `pnpm typecheck` | `tsc --noEmit` |
-| `pnpm check` | Both — use this as the CI gate |
+| `pnpm check` | Typecheck + tests — use this as the CI gate |
 
-Current status: **74 tests across 4 files, typecheck clean.**
+Current status: **71 tests across 4 domain files, typecheck clean. Phase 1
+sell/tender/void screens built and manually verified; not yet run on a real
+trading day** (see `PLAN.md`'s Phase 1 "done when").
 
 `.npmrc` sets `strict-peer-dependencies` and disables `auto-install-peers`, so
 a missing peer fails the install rather than resolving to something unexpected
@@ -50,12 +55,19 @@ src/
 ├── tax/
 │   ├── rates.ts          Dated VAT lookup, Bangkok-local decree boundaries
 │   └── vat.ts            Inclusive extraction, document VAT, registration watchdog
-└── channel/
-    ├── types.ts          Channel / GP / per-channel price / recipe override schema
-    └── settlement.ts     Commission, payout, contribution margin, break-even price
+├── channel/
+│   ├── types.ts          Channel / GP / per-channel price / recipe override schema
+│   └── settlement.ts     Commission, payout, contribution margin, break-even price
+├── db/                   Dexie schema, receipt numbering, checkout, void — Phase 1
+├── ui/                   Sell screen components — Phase 1
+└── App.tsx               Screen state machine: sell → tender → done
 ```
 
-Tests sit beside their modules as `*.test.ts`.
+Domain modules (`money.ts`, `tax/**`, `channel/**`) stay pure — no React, no
+Dexie. `db/` and `ui/` are the Phase 1 layer built on top. Tests sit beside
+their modules as `*.test.ts`; currently only the domain layer is covered
+this way — `db/`'s Dexie-backed logic was verified manually against a real
+IndexedDB in-browser rather than with an automated suite (see Caveat).
 
 ## Invariants the tests hold
 
@@ -130,8 +142,11 @@ difference is material.
 
 ## Roadmap
 
-Phase 0 (this domain layer) is complete. Phase 1 is the Dexie schema and the
-sell screen, so it can be used on a real counter.
+Phase 0 (domain layer) is complete, with tests. Phase 1 (Dexie schema + sell
+screen) is built: tap item → cart → cash tender → change due → done, plus
+void with owner PIN. What's left before Phase 1 is genuinely *done* is
+real-world use — PLAN.md's bar is a full trading day without reaching for
+the notebook, which only happens at the counter, not in this repo.
 
 See `PLAN.md` for all nine phases, what each one deliberately excludes, and
 the "done when" test for each. See `DESIGN.md` before building any UI.
@@ -142,3 +157,10 @@ Not accountancy advice. POS machine approval, abbreviated tax invoice field
 requirements, and withholding tax treatment depend on Revenue Department
 practice and your legal form. Have a Thai accountant review the invoice layout
 and your first PP.30 before relying on any of this.
+
+`db/sales.ts`, `db/voids.ts`, and `db/receipts.ts` coordinate Dexie writes
+around the (fully tested) domain layer. They were verified manually — full
+sell → tender → done → void flow, checked against the real IndexedDB records
+in-browser — rather than with an automated suite, since that would need a
+fake-IndexedDB dev dependency not yet approved. Worth adding before this
+layer grows further.
