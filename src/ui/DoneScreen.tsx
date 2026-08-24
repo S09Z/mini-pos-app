@@ -6,10 +6,13 @@ export function DoneScreen({
   sale,
   onNewSale,
   onVoid,
+  onTaxInvoice,
 }: {
   sale: SaleRecord;
   onNewSale: () => void;
   onVoid: () => void;
+  /** Absent unless the sale is eligible — see CLAUDE.md rule 7. */
+  onTaxInvoice?: () => void;
 }) {
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-6 p-8">
@@ -33,6 +36,15 @@ export function DoneScreen({
         >
           New sale
         </button>
+        {onTaxInvoice !== undefined && (
+          <button
+            type="button"
+            onClick={onTaxInvoice}
+            className="h-[44pt] rounded-[4pt] border border-rule text-13"
+          >
+            Tax invoice
+          </button>
+        )}
         <button type="button" onClick={onVoid} className="h-[44pt] rounded-[4pt] text-13 text-beni">
           Void sale
         </button>

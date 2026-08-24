@@ -1,12 +1,13 @@
 # CLAUDE.md
 
-Offline-first matcha POS, PWA on iPad. This repo currently holds the **domain
-layer only** — pure Thai VAT and delivery-commission logic, no I/O, no UI.
+Offline-first matcha POS, PWA on iPad. A pure domain layer — Thai VAT and
+delivery-commission logic, no I/O — with a Dexie store and a React UI on top
+of it. The domain layer stays pure; that separation is the point.
 
 Read `PLAN.md` for what phase we are in before proposing work. Read
 `DESIGN.md` before writing any UI.
 
-**Current phase: 1 — the sell screen.** Phase 0 (domain) is done.
+**Current phase: 6 — VAT mode.** Phases 0–5 are done.
 
 ## Commands
 
@@ -82,12 +83,18 @@ src/
 ├── money.ts              Satang type, arithmetic, largest-remainder allocation
 ├── tax/rates.ts          Dated VAT lookup, Bangkok-local decree boundaries
 ├── tax/vat.ts            Inclusive extraction, document VAT, threshold watchdog
+├── tax/registration.ts   Registration ledger, Thai tax ID, trailing-12m watchdog
+├── tax/invoice.ts        Abbreviated and full tax invoice documents
+├── tax/pp30.ts           Output/input tax by month, payable, credit carried
+├── tax/pp30csv.ts        PP.30 and supplier-invoice export
 ├── channel/types.ts      Channel / GP / per-channel price / recipe override
-└── channel/settlement.ts Commission, payout, contribution, break-even price
+├── channel/settlement.ts Commission, payout, contribution, break-even price
+├── stock/, day/, payout/ Recipes and costing, day close, payout matching
+├── db/                   Dexie schema and stores — the only place I/O lives
+└── ui/                   React screens; DESIGN.md governs all of it
 ```
 
-Phase 1 adds `src/db/` (Dexie) and `src/ui/`. Keep the domain layer free of
-both.
+Keep the domain layer free of both `db/` and `ui/`.
 
 ## Ask before
 

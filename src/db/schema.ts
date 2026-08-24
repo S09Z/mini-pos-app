@@ -95,10 +95,90 @@ export interface DeviceConfigRecord {
   readonly id: "device";
   readonly receiptPrefix: string;
   readonly nextReceiptSeq: number;
-  /** Below the registration threshold by default; VAT registration is a Phase 6 concern. */
-  readonly vatRegistered: boolean;
   /** Soft gate on void, not an auth system — see PLAN.md Phase 8 for real roles/hashed PINs. */
   readonly ownerPin: string;
+  /** Legal name and address of the seller, as they must appear on a tax invoice. */
+  readonly businessName: string;
+  readonly businessAddress: string;
+  /**
+   * Tax invoices carry their own serial sequence, separate from receipt
+   * numbers. A tax invoice number must be unique and unbroken; receipt numbers
+   * are also consumed by voids, so sharing one sequence would leave gaps that
+   * look exactly like a destroyed invoice.
+   */
+  readonly taxInvoicePrefix: string;
+  readonly nextTaxInvoiceSeq: number;
+}
+
+/**
+ * One event in the VAT registration ledger. Append-only.
+ *
+ * Registration is a dated fact, not a switch: a sale rung last March must
+ * reprint under the status that applied last March. Correcting a mistake means
+ * appending another event — editing an effective date would silently restate
+ * the VAT treatment of every sale in between. See `tax/registration.ts`.
+ */
+export interface RegistrationEventRecord {
+  readonly id: string;
+  readonly kind: "REGISTERED" | "DEREGISTERED";
+  readonly effectiveFrom: string;
+  readonly taxId: string;
+  readonly branchCode: string;
+  readonly posMachineNumber: string;
+  readonly note: string;
+  readonly recordedAt: string;
+}
+
+/**
+ * A tax invoice that has been issued. Append-only, and issuing is the only
+ * way a number is consumed.
+ *
+ * Reprints are rows too, marked `copy`, so "how many times was this document
+ * handed out, and when" is answerable. Two unmarked originals of one invoice
+ * number is exactly the document a duplicate input-tax claim is built on.
+ */
+export interface TaxInvoiceRecord {
+  readonly id: string;
+  readonly invoiceNo: string;
+  readonly kind: "ABBREVIATED" | "FULL";
+  readonly saleId: string;
+  readonly receiptNo: string;
+  readonly issuedAt: string;
+  readonly copy: boolean;
+  /** Seller identity as it appeared on the document, frozen — rule 5. */
+  readonly sellerName: string;
+  readonly sellerAddress: string;
+  readonly sellerTaxId: string;
+  readonly branchCode: string;
+  readonly posMachineNumber: string;
+  /** Null on an abbreviated invoice — it does not identify the buyer. */
+  readonly buyerName: string | null;
+  readonly buyerAddress: string | null;
+  readonly buyerTaxId: string | null;
+  readonly grossSatang: number;
+  readonly netSatang: number;
+  readonly vatSatang: number;
+  readonly rateBp: BasisPoints;
+}
+
+/**
+ * A purchase invoice from a supplier — the input-tax side of PP.30.
+ *
+ * `claimable: false` keeps a purchase in the record while excluding its VAT
+ * from the claim. Deleting it instead would make the disallowed amount
+ * invisible, and "what did we fail to claim, and why" is a question worth
+ * being able to answer.
+ */
+export interface PurchaseRecord {
+  readonly id: string;
+  readonly at: string;
+  readonly supplier: string;
+  readonly invoiceNo: string;
+  readonly netSatang: number;
+  readonly vatSatang: number;
+  readonly claimable: boolean;
+  readonly disallowedReason: string | null;
+  readonly note: string;
 }
 
 /** An ingredient you actually stock. You do not stock lattes — see stock/recipe.ts. */
@@ -292,6 +372,9 @@ export const db = new Dexie("mini-pos-app") as Dexie & {
   payout_batches: EntityTable<PayoutBatchRecord, "id">;
   statement_rows: EntityTable<StatementRowRecord, "id">;
   payout_exceptions: EntityTable<PayoutExceptionRecord, "id">;
+  registration_events: EntityTable<RegistrationEventRecord, "id">;
+  tax_invoices: EntityTable<TaxInvoiceRecord, "id">;
+  purchases: EntityTable<PurchaseRecord, "id">;
 };
 
 db.version(1).stores({
@@ -378,6 +461,46 @@ db.version(5).stores({
   statement_rows: "id, batchId, platformOrderId",
   payout_exceptions: "id, batchId, kind, platformOrderId, reason",
 });
+
+// v6 — Phase 6 VAT mode.
+//
+// `device_config.vatRegistered` is *removed* here rather than carried forward.
+// It was a boolean, and registration is a dated fact: a flag can only ever
+// answer "am I registered now", which is the wrong question when reprinting a
+// March receipt, and it would go stale the moment a registration is entered
+// with a future effective date. `registration_events` replaces it, and
+// `registrationAt()` answers the dated question properly.
+//
+// Dropping it loses nothing: no release before this one could set it, so every
+// existing install holds `false` — which is exactly what an empty ledger says.
+// Existing sales are untouched either way, because each one froze its own
+// `vatRegistered` at checkout.
+db.version(6)
+  .stores({
+    registration_events: "id, effectiveFrom, kind",
+    tax_invoices: "id, invoiceNo, saleId, issuedAt",
+    purchases: "id, at, supplier",
+  })
+  .upgrade(async (tx) => {
+    await tx
+      .table("device_config")
+      .toCollection()
+      .modify(
+        (device: {
+          businessName?: string;
+          businessAddress?: string;
+          taxInvoicePrefix?: string;
+          nextTaxInvoiceSeq?: number;
+          vatRegistered?: boolean;
+        }) => {
+          device.businessName ??= "";
+          device.businessAddress ??= "";
+          device.taxInvoicePrefix ??= "TX";
+          device.nextTaxInvoiceSeq ??= 1;
+          delete device.vatRegistered;
+        },
+      );
+  });
 
 const DEFAULT_MENU: readonly MenuItemRecord[] = [
   { id: "usucha", name: "Usucha", priceSatang: 8_000, sortOrder: 0, soldOut: false },
@@ -521,8 +644,11 @@ export async function seedIfEmpty(): Promise<void> {
           id: "device",
           receiptPrefix: "A",
           nextReceiptSeq: 1,
-          vatRegistered: false,
           ownerPin: "1234",
+          businessName: "",
+          businessAddress: "",
+          taxInvoicePrefix: "TX",
+          nextTaxInvoiceSeq: 1,
         });
       }
       // Reference data is seeded per row, so rows introduced by a later phase

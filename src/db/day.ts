@@ -229,12 +229,14 @@ export async function buildDayView(day: string): Promise<DayView> {
   const audit = auditVoids(auditable, salesRung, report.totals.gross);
 
   const voidedSaleIds = new Set(report.voids.map((v) => v.saleId));
-  const device = await db.device_config.get("device");
+  // Taken from the day's own sales rather than from today's registration
+  // status, for the same reason the rate below it is: re-running an old
+  // Z-report after registering must not restate what that day actually took.
   const { byChannel, pricingAnswers } = await buildChannelView(
     sales,
     lines,
     voidedSaleIds,
-    device?.vatRegistered ?? false,
+    sales[0]?.vatRegistered ?? false,
   );
 
   return {

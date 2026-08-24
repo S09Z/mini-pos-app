@@ -1,4 +1,4 @@
-export type Tab = "sell" | "stock" | "day" | "payouts" | "settings";
+export type Tab = "sell" | "stock" | "day" | "payouts" | "tax" | "settings";
 
 const TABS: readonly { key: Tab; glyph: string; label: string; enabled: boolean }[] = [
   { key: "sell", glyph: "▣", label: "Sell", enabled: true },
@@ -7,6 +7,9 @@ const TABS: readonly { key: Tab; glyph: string; label: string; enabled: boolean 
   // Its own tab rather than a section of Day: reconciling a payout is a
   // fortnightly job done sitting down, not part of closing the till.
   { key: "payouts", glyph: "▧", label: "Payouts", enabled: true },
+  // Monthly paperwork done sitting down, like Payouts. None of it belongs in
+  // the four seconds it takes to ring a sale.
+  { key: "tax", glyph: "▨", label: "Tax", enabled: true },
   { key: "settings", glyph: "▦", label: "Settings", enabled: false },
 ];
 

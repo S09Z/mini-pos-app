@@ -12,6 +12,10 @@ import {
 } from "./db/stock.js";
 import { buildDayView, loadDayData, recordCashCount, tradingDays } from "./db/day.js";
 import { bangkokToday } from "./day/period.js";
+import { rateAt } from "./tax/rates.js";
+import { HEAD_OFFICE_BRANCH } from "./tax/registration.js";
+import { pp30Csv, pp30PurchasesCsv } from "./tax/pp30csv.js";
+import type { TaxInvoice } from "./tax/invoice.js";
 import { salesCsv, saleLinesCsv, daySummaryCsv } from "./day/csv.js";
 import { menuStockByItem } from "./stock/availability.js";
 import { quantity } from "./stock/units.js";
@@ -30,6 +34,9 @@ import { VoidDialog } from "./ui/VoidDialog.js";
 import { StockScreen, type StockActions } from "./ui/StockScreen.js";
 import { DayScreen, type DayActions } from "./ui/DayScreen.js";
 import { PayoutsScreen, type PayoutActions } from "./ui/PayoutsScreen.js";
+import { TaxScreen, type TaxActions } from "./ui/TaxScreen.js";
+import { TaxInvoiceDialog, type IssueRequest } from "./ui/TaxInvoiceDialog.js";
+import { ProvisionalRateBanner } from "./ui/ProvisionalRateBanner.js";
 import { ChannelBar } from "./ui/ChannelBar.js";
 import { downloadText } from "./ui/download.js";
 import {
@@ -40,6 +47,15 @@ import {
   reopenException,
   resolveException,
 } from "./db/payouts.js";
+import {
+  appendRegistrationEvent,
+  buildReturn,
+  buildTaxView,
+  issueTaxInvoice,
+  recordPurchase as recordTaxPurchase,
+  reprintTaxInvoice,
+  saveBusinessIdentity,
+} from "./db/tax.js";
 
 type Screen = { name: "sell" } | { name: "tender" } | { name: "done"; sale: SaleRecord };
 
@@ -55,6 +71,17 @@ export function App() {
   /** A refused checkout has to be visible; silently doing nothing is worse than the error. */
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [batchId, setBatchId] = useState<string | null>(null);
+  /**
+   * The provisional-rate warning, dismissed for the session only.
+   *
+   * DESIGN.md asks for persistent and dismissible, not modal: it must not cost
+   * a tap during service, and it must come back tomorrow if the decree still
+   * has not been keyed in.
+   */
+  const [rateWarningDismissed, setRateWarningDismissed] = useState(false);
+  /** The sale an invoice is being issued for, and the document once built. */
+  const [invoicingSale, setInvoicingSale] = useState<SaleRecord | null>(null);
+  const [issuedInvoice, setIssuedInvoice] = useState<TaxInvoice | null>(null);
 
   useEffect(() => {
     seedIfEmpty()
@@ -150,6 +177,79 @@ export function App() {
       recordDeposit: async (forBatch, deposit) => {
         await recordDeposit(forBatch, deposit);
       },
+    }),
+    [],
+  );
+
+  const taxView = useLiveQuery(() => (ready ? buildTaxView() : null), [ready]);
+
+  /**
+   * The rate in force right now, resolved once per render of the sell screen.
+   *
+   * Only used to decide whether to show the warning — the rate a sale is
+   * actually charged at is resolved and frozen inside `checkout()`, never
+   * taken from here.
+   */
+  const currentRate = useMemo(() => rateAt("VAT_TH", new Date()), []);
+
+  const taxActions: TaxActions = useMemo(
+    () => ({
+      register: async (input) => {
+        await appendRegistrationEvent({ kind: "REGISTERED", ...input });
+      },
+      deregister: async (input) => {
+        await appendRegistrationEvent({
+          kind: "DEREGISTERED",
+          effectiveFrom: input.effectiveFrom,
+          note: input.note,
+          taxId: "",
+          branchCode: HEAD_OFFICE_BRANCH,
+          posMachineNumber: "",
+        });
+      },
+      saveIdentity: async (name, address) => {
+        await saveBusinessIdentity(name, address);
+      },
+      recordPurchase: async (input) => {
+        await recordTaxPurchase({
+          at: input.at,
+          supplier: input.supplier,
+          invoiceNo: input.invoiceNo,
+          netSatang: input.net,
+          vatSatang: input.vat,
+          claimable: input.claimable,
+          disallowedReason: input.disallowedReason,
+          note: "",
+        });
+      },
+      exportReturn: async (period) => {
+        const ret = await buildReturn(period);
+        const purchases = await db.purchases.toArray();
+        downloadText(`pp30-${period}.csv`, pp30Csv(ret));
+        // Staggered like the day export: a browser drops the second download
+        // if it arrives while the first is still being handed off.
+        setTimeout(
+          () =>
+            downloadText(
+              `pp30-${period}-purchases.csv`,
+              pp30PurchasesCsv(
+                period,
+                purchases.map((p) => ({
+                  id: p.id,
+                  at: p.at,
+                  supplier: p.supplier,
+                  invoiceNo: p.invoiceNo,
+                  net: satang(p.netSatang),
+                  vat: satang(p.vatSatang),
+                  claimable: p.claimable,
+                  disallowedReason: p.disallowedReason,
+                })),
+              ),
+            ),
+          300,
+        );
+      },
+      reprint: (invoiceRecordId) => reprintTaxInvoice(invoiceRecordId),
     }),
     [],
   );
@@ -281,7 +381,16 @@ export function App() {
   function handleNewSale() {
     setCart([]);
     setPlatformOrderId("");
+    setInvoicingSale(null);
+    setIssuedInvoice(null);
     setScreen({ name: "sell" });
+  }
+
+  async function handleIssueInvoice(sale: SaleRecord, request: IssueRequest) {
+    // Errors surface in the dialog, next to the fields that caused them —
+    // rethrown rather than swallowed here.
+    const { invoice } = await issueTaxInvoice(sale.id, request);
+    setIssuedInvoice(invoice);
   }
 
   async function handleVoidConfirm(pin: string) {
@@ -309,6 +418,13 @@ export function App() {
 
       {tab === "stock" && <StockScreen ingredients={ingredients ?? []} actions={stockActions} />}
 
+      {tab === "tax" &&
+        (taxView == null ? (
+          <div className="flex flex-1 items-center justify-center text-15 opacity-60">Loading…</div>
+        ) : (
+          <TaxScreen view={taxView} actions={taxActions} />
+        ))}
+
       {tab === "payouts" && (
         <PayoutsScreen
           channels={channels ?? []}
@@ -335,6 +451,12 @@ export function App() {
 
       {tab === "sell" && screen.name === "sell" && (
         <div className="flex flex-1 flex-col overflow-hidden">
+          {!rateWarningDismissed && (
+            <ProvisionalRateBanner
+              rate={currentRate}
+              onDismiss={() => setRateWarningDismissed(true)}
+            />
+          )}
           <ChannelBar
             channels={channels ?? []}
             activeId={channelId}
@@ -384,7 +506,30 @@ export function App() {
       )}
 
       {tab === "sell" && screen.name === "done" && (
-        <DoneScreen sale={screen.sale} onNewSale={handleNewSale} onVoid={() => setVoiding(screen.sale)} />
+        <DoneScreen
+          sale={screen.sale}
+          onNewSale={handleNewSale}
+          onVoid={() => setVoiding(screen.sale)}
+          // Offered only when the sale itself carries the eligibility, which
+          // `checkout()` froze from the registration in force at the time.
+          // Rule 7 is enforced in the domain either way; not offering it is
+          // simply the honest UI for a stall below the threshold.
+          {...(screen.sale.taxInvoiceEligible
+            ? { onTaxInvoice: () => setInvoicingSale(screen.sale) }
+            : {})}
+        />
+      )}
+
+      {invoicingSale && (
+        <TaxInvoiceDialog
+          sale={invoicingSale}
+          issued={issuedInvoice}
+          onIssue={(request) => handleIssueInvoice(invoicingSale, request)}
+          onClose={() => {
+            setInvoicingSale(null);
+            setIssuedInvoice(null);
+          }}
+        />
       )}
 
       {voiding && (

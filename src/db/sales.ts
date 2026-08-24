@@ -23,6 +23,7 @@ import {
   type PlatformFeeRecord,
 } from "./schema.js";
 import { nextReceiptNumber } from "./receipts.js";
+import { registrationStateAt } from "./tax.js";
 import { depleteForSale, unitCostMap } from "./stock.js";
 import { resolveRecipe } from "../stock/recipe.js";
 import { costOf, costOfGoods, type UnitCost } from "../stock/costing.js";
@@ -98,6 +99,12 @@ export async function checkout(
   const now = new Date();
   const rate = rateAt("VAT_TH", now);
 
+  // Resolved from the registration ledger at the instant of sale, not from a
+  // stored flag: a registration entered today with next month's effective date
+  // must not start charging VAT today. Both this and the rate are frozen onto
+  // the record below, so the receipt reprints under the rules that applied.
+  const registration = await registrationStateAt(now);
+
   // Belt and braces on the channel's own rule: refuse a ticket priced for a
   // different channel. The UI already blocks the window where a stale price
   // map could be tapped, but "impossible to ring a delivery order at counter
@@ -116,7 +123,7 @@ export async function checkout(
   }));
   const doc = computeDocumentVat(docLines, {
     rateBp: rate.rateBp,
-    vatRegistered: device.vatRegistered,
+    vatRegistered: registration.registered,
   });
 
   const dueFromCustomer = satang(doc.gross - merchantFundedDiscount);
