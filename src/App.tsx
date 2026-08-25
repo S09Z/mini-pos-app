@@ -2,19 +2,32 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { db, seedIfEmpty, type MenuItemRecord, type SaleRecord } from "./db/schema.js";
 import { checkout, type CartLine } from "./db/sales.js";
 import { voidSale } from "./db/voids.js";
+import {
+  ingredientsSorted,
+  onHandMap,
+  requirementsByMenuItem,
+  recordWaste,
+  recordPurchase,
+  recordCount,
+} from "./db/stock.js";
+import { menuStockByItem } from "./stock/availability.js";
+import { quantity } from "./stock/units.js";
+import { stockStatus } from "./stock/ledger.js";
 import type { Satang } from "./money.js";
 import { useLiveQuery } from "./ui/useLiveQuery.js";
-import { RailNav } from "./ui/RailNav.js";
+import { RailNav, type Tab } from "./ui/RailNav.js";
 import { MenuGrid } from "./ui/MenuGrid.js";
 import { Ticket } from "./ui/Ticket.js";
 import { CashTenderScreen } from "./ui/CashTenderScreen.js";
 import { DoneScreen } from "./ui/DoneScreen.js";
 import { VoidDialog } from "./ui/VoidDialog.js";
+import { StockScreen, type StockActions } from "./ui/StockScreen.js";
 
 type Screen = { name: "sell" } | { name: "tender" } | { name: "done"; sale: SaleRecord };
 
 export function App() {
   const [ready, setReady] = useState(false);
+  const [tab, setTab] = useState<Tab>("sell");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [screen, setScreen] = useState<Screen>({ name: "sell" });
   const [voiding, setVoiding] = useState<SaleRecord | null>(null);
@@ -30,10 +43,42 @@ export function App() {
     [ready],
   );
 
+  const ingredients = useLiveQuery(() => (ready ? ingredientsSorted() : []), [ready]);
+
+  // Re-reads whenever a movement lands, so depleting stock updates the tiles
+  // without the sell screen knowing anything about the ledger.
+  const stockView = useLiveQuery(async () => {
+    if (!ready) return null;
+    const [onHand, requirements, allIngredients] = await Promise.all([
+      onHandMap(),
+      requirementsByMenuItem(),
+      ingredientsSorted(),
+    ]);
+    const reorderPoints = new Map(allIngredients.map((i) => [i.id, quantity(i.reorderPoint)]));
+    return {
+      byItem: menuStockByItem(requirements, onHand, reorderPoints),
+      names: new Map(allIngredients.map((i) => [i.id, i.name])),
+    };
+  }, [ready]);
+
   const total = useMemo(
     () => cart.reduce((acc, l) => acc + l.unitPriceSatang * l.qty, 0) as Satang,
     [cart],
   );
+
+  /** Surfaced on the rail so a low tin is visible from the sell screen. */
+  const stockAlert = useMemo(() => {
+    if (!ingredients) return undefined;
+    const out = ingredients.filter(
+      (i) => stockStatus(quantity(i.onHand), quantity(i.reorderPoint)) === "OUT",
+    ).length;
+    const low = ingredients.filter(
+      (i) => stockStatus(quantity(i.onHand), quantity(i.reorderPoint)) === "LOW",
+    ).length;
+    if (out > 0) return { stock: String(out) };
+    if (low > 0) return { stock: String(low) };
+    return undefined;
+  }, [ingredients]);
 
   const addItem = useCallback((item: MenuItemRecord) => {
     setCart((prev) => {
@@ -60,6 +105,21 @@ export function App() {
     );
   }, []);
 
+  const stockActions: StockActions = useMemo(
+    () => ({
+      recordWaste: async (id, qty, reason) => {
+        await recordWaste(id, qty, reason);
+      },
+      recordPurchase: async (id, qty, totalCost) => {
+        await recordPurchase(id, qty, totalCost);
+      },
+      recordCount: async (id, counted) => {
+        await recordCount(id, counted);
+      },
+    }),
+    [],
+  );
+
   async function handleConfirmTender(tendered: Satang) {
     const { sale } = await checkout(cart, tendered);
     setScreen({ name: "done", sale });
@@ -77,17 +137,32 @@ export function App() {
     handleNewSale();
   }
 
-  if (!ready || menuItems === undefined) {
+  if (!ready || menuItems === undefined || ingredients === undefined || stockView === undefined) {
     return <div className="flex h-full items-center justify-center text-15 opacity-60">Loading…</div>;
   }
 
   return (
     <div className="flex h-screen w-screen">
-      <RailNav />
+      <RailNav
+        active={tab}
+        onNavigate={(next) => {
+          setTab(next);
+          // Leaving mid-tender would strand a ticket; go back to a clean sell screen.
+          if (next === "sell") setScreen({ name: "sell" });
+        }}
+        {...(stockAlert ? { alert: stockAlert } : {})}
+      />
 
-      {screen.name === "sell" && (
+      {tab === "stock" && <StockScreen ingredients={ingredients ?? []} actions={stockActions} />}
+
+      {tab === "sell" && screen.name === "sell" && (
         <>
-          <MenuGrid items={menuItems} onSelect={addItem} />
+          <MenuGrid
+            items={menuItems}
+            stock={stockView?.byItem ?? new Map()}
+            ingredientNames={stockView?.names ?? new Map()}
+            onSelect={addItem}
+          />
           <Ticket
             cart={cart}
             onIncrement={incrementLine}
@@ -97,7 +172,7 @@ export function App() {
         </>
       )}
 
-      {screen.name === "tender" && (
+      {tab === "sell" && screen.name === "tender" && (
         <CashTenderScreen
           total={total}
           onConfirm={handleConfirmTender}
@@ -105,7 +180,7 @@ export function App() {
         />
       )}
 
-      {screen.name === "done" && (
+      {tab === "sell" && screen.name === "done" && (
         <DoneScreen sale={screen.sale} onNewSale={handleNewSale} onVoid={() => setVoiding(screen.sale)} />
       )}
 

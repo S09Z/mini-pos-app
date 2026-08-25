@@ -12,6 +12,7 @@ import { rateAt } from "../tax/rates.js";
 import { computeDocumentVat, type DocumentLineInput } from "../tax/vat.js";
 import { db, type SaleRecord, type SaleLineRecord } from "./schema.js";
 import { nextReceiptNumber } from "./receipts.js";
+import { depleteForSale } from "./stock.js";
 
 export class CheckoutError extends Error {
   override readonly name = "CheckoutError";
@@ -88,10 +89,26 @@ export async function checkout(
     };
   });
 
-  await db.transaction("rw", db.sales, db.sale_lines, async () => {
-    await db.sales.add(sale);
-    await db.sale_lines.bulkAdd(lines);
-  });
+  // The depletion shares the sale's transaction: a sale that booked without
+  // taking its ingredients out of stock would put the count wrong in a way no
+  // later reconciliation could explain.
+  await db.transaction(
+    "rw",
+    db.sales,
+    db.sale_lines,
+    db.ingredients,
+    db.stock_movements,
+    db.recipe_lines,
+    async () => {
+      await db.sales.add(sale);
+      await db.sale_lines.bulkAdd(lines);
+      await depleteForSale(
+        cart.map((l) => ({ menuItemId: l.menuItemId, qty: l.qty })),
+        saleId,
+        sale.createdAt,
+      );
+    },
+  );
 
   return { sale, lines };
 }
