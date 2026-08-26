@@ -31,6 +31,18 @@ export interface SaleLineRecord {
   readonly grossSatang: number;
   readonly netSatang: number;
   readonly vatSatang: number;
+  /**
+   * Cost of the ingredients this line consumed, frozen at checkout.
+   *
+   * Rule 5's principle applied to cost: a Z-report re-run after a supplier
+   * price change must still reproduce the margin the day actually earned.
+   * Recomputing from today's weighted average would quietly restate history.
+   *
+   * `null` means not costed — sales written before this field existed, or an
+   * item with no recipe. Reports must say "unknown", never assume zero cost,
+   * because zero cost reads as 100% margin.
+   */
+  readonly cogsSatang: number | null;
 }
 
 export interface SaleRecord {
@@ -55,6 +67,13 @@ export interface VoidRecord {
   readonly saleId: string;
   readonly receiptNo: string;
   readonly createdAt: string;
+  /**
+   * Who authorised it. Only "owner" exists until Phase 8 introduces staff
+   * roles, so grouping by actor is structural for now — but the field has to
+   * be on the record from the first void, or the audit trail starts empty on
+   * the day it finally matters.
+   */
+  readonly actor: string;
 }
 
 /** Singleton row: local device identity and the sequence used for receipt numbers. */
@@ -112,6 +131,26 @@ export interface StockMovementRecord {
   readonly note: string;
 }
 
+/**
+ * A drawer count. Append-only, like everything else that records a
+ * discrepancy: the variance is its own row and is never silently corrected,
+ * because a till that quietly agrees with itself every night is exactly how
+ * theft stays invisible.
+ */
+export interface CashCountRecord {
+  readonly id: string;
+  /** Bangkok-local trading day, YYYY-MM-DD. */
+  readonly day: string;
+  readonly countedAt: string;
+  /** What the sales say should be in the drawer. */
+  readonly expectedSatang: number;
+  /** What the operator actually counted. */
+  readonly declaredSatang: number;
+  /** declared − expected. Negative is short. */
+  readonly varianceSatang: number;
+  readonly note: string;
+}
+
 export const db = new Dexie("mini-pos-app") as Dexie & {
   menu_items: EntityTable<MenuItemRecord, "id">;
   sales: EntityTable<SaleRecord, "id">;
@@ -121,6 +160,7 @@ export const db = new Dexie("mini-pos-app") as Dexie & {
   ingredients: EntityTable<IngredientRecord, "id">;
   recipe_lines: EntityTable<RecipeLineRecord, "id">;
   stock_movements: EntityTable<StockMovementRecord, "id">;
+  cash_counts: EntityTable<CashCountRecord, "id">;
 };
 
 db.version(1).stores({
@@ -138,6 +178,30 @@ db.version(2).stores({
   recipe_lines: "id, menuItemId, ingredientId",
   stock_movements: "id, ingredientId, at, saleId, kind",
 });
+
+// v3 — Phase 3 day close. `cash_counts` is new; the two backfills below make
+// the absence of older data explicit in the record rather than leaving it to
+// be inferred from a missing field.
+db.version(3)
+  .stores({
+    cash_counts: "id, day, countedAt",
+  })
+  .upgrade(async (tx) => {
+    // Pre-v3 sales were never costed. Marked unknown, not zero — see
+    // SaleLineRecord.cogsSatang.
+    await tx
+      .table("sale_lines")
+      .toCollection()
+      .modify((line: { cogsSatang?: number | null }) => {
+        line.cogsSatang = null;
+      });
+    await tx
+      .table("voids")
+      .toCollection()
+      .modify((v: { actor?: string }) => {
+        v.actor = "owner";
+      });
+  });
 
 const DEFAULT_MENU: readonly MenuItemRecord[] = [
   { id: "usucha", name: "Usucha", priceSatang: 8_000, sortOrder: 0, soldOut: false },
