@@ -10,6 +10,8 @@ import Dexie, { type EntityTable } from "dexie";
 import type { BasisPoints } from "../money.js";
 import type { Unit } from "../stock/units.js";
 import type { MovementKind, WasteReason } from "../stock/ledger.js";
+import type { GpBasis, GpAppliesTo } from "../channel/types.js";
+import { WALK_IN, GRAB } from "../channel/types.js";
 
 export interface MenuItemRecord {
   readonly id: string;
@@ -59,6 +61,18 @@ export interface SaleRecord {
   readonly taxInvoiceEligible: boolean;
   readonly tenderedSatang: number;
   readonly changeSatang: number;
+  /**
+   * Which channel rang this sale. Counter sales are `WALK_IN`.
+   *
+   * Frozen on the record because the same drink is economically a different
+   * product per channel, and a report that had to infer the channel later
+   * could not tell a counter sale from a delivery one at all.
+   */
+  readonly channelId: string;
+  /** The platform's own order reference, keyed from their tablet. Null at the counter. */
+  readonly platformOrderId: string | null;
+  /** Discount funded by the merchant, not the platform. Kept separate — see PlatformFeeRecord. */
+  readonly merchantFundedDiscountSatang: number;
 }
 
 export interface VoidRecord {
@@ -106,6 +120,12 @@ export interface IngredientRecord {
   /** Millisatang per display unit — weighted average, updated on purchase. */
   readonly costPerUnit: number;
   readonly sortOrder: number;
+  /**
+   * Cups, lids, bags. Split from ingredients only for reporting —
+   * `settle()` adds the two together, but seeing packaging separately is how
+   * you notice that delivery's extra wrapping is eating the markup.
+   */
+  readonly isPackaging: boolean;
 }
 
 /** Bill of materials. `channelId: null` is the base recipe; see stock/recipe.ts for override semantics. */
@@ -151,6 +171,53 @@ export interface CashCountRecord {
   readonly note: string;
 }
 
+/** A sales channel. Mirrors `channel/types.ts`, stored so it can be edited per contract. */
+export interface ChannelRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly gpRateBp: number;
+  readonly gpBasis: GpBasis;
+  readonly gpAppliesTo: GpAppliesTo;
+  readonly gpVatRateBp: number;
+  readonly whtRateBp: number;
+  readonly requiresDeliveryPackaging: boolean;
+  readonly active: boolean;
+  readonly sortOrder: number;
+}
+
+/** Per-channel list price, dated. Add a row; never edit one. */
+export interface ChannelPriceRecord {
+  readonly id: string;
+  readonly menuItemId: string;
+  readonly channelId: string;
+  readonly priceSatang: number;
+  readonly validFrom: string;
+  readonly validTo: string | null;
+}
+
+/**
+ * Commission frozen at the moment of sale, one row per delivery sale.
+ *
+ * Rule 5 applied to commission: renegotiating GP next quarter must not
+ * restate what last quarter's orders actually earned. `payoutBatchId` stays
+ * null until Phase 5 matches it to a deposit.
+ */
+export interface PlatformFeeRecord {
+  readonly saleId: string;
+  readonly channelId: string;
+  readonly platformOrderId: string;
+  readonly gpAmountSatang: number;
+  readonly gpVatSatang: number;
+  readonly whtSatang: number;
+  readonly merchantFundedDiscountSatang: number;
+  readonly netPayoutSatang: number;
+  /** The contract reading this was computed under, frozen alongside the figures. */
+  readonly gpRateBp: number;
+  readonly gpBasis: GpBasis;
+  readonly gpAppliesTo: GpAppliesTo;
+  readonly payoutBatchId: string | null;
+}
+
 export const db = new Dexie("mini-pos-app") as Dexie & {
   menu_items: EntityTable<MenuItemRecord, "id">;
   sales: EntityTable<SaleRecord, "id">;
@@ -161,6 +228,9 @@ export const db = new Dexie("mini-pos-app") as Dexie & {
   recipe_lines: EntityTable<RecipeLineRecord, "id">;
   stock_movements: EntityTable<StockMovementRecord, "id">;
   cash_counts: EntityTable<CashCountRecord, "id">;
+  channels: EntityTable<ChannelRecord, "id">;
+  channel_prices: EntityTable<ChannelPriceRecord, "id">;
+  platform_fees: EntityTable<PlatformFeeRecord, "saleId">;
 };
 
 db.version(1).stores({
@@ -203,6 +273,42 @@ db.version(3)
       });
   });
 
+// v4 — Phase 4 delivery channels. Existing sales predate the channel
+// dimension entirely, so they are backfilled as counter sales: that is what
+// they were, and leaving the field absent would drop them out of every
+// per-channel report.
+db.version(4)
+  .stores({
+    channels: "id, sortOrder",
+    channel_prices: "id, menuItemId, channelId, [menuItemId+channelId]",
+    platform_fees: "saleId, channelId, platformOrderId, payoutBatchId",
+  })
+  .upgrade(async (tx) => {
+    await tx
+      .table("sales")
+      .toCollection()
+      .modify((sale: { channelId?: string; platformOrderId?: string | null; merchantFundedDiscountSatang?: number }) => {
+        sale.channelId = WALK_IN.id;
+        sale.platformOrderId = null;
+        sale.merchantFundedDiscountSatang = 0;
+      });
+
+    // Ingredients seeded before `isPackaging` existed have no such key, and an
+    // absent flag reads as false — which would file cups under ingredients and
+    // quietly understate what packaging costs on every channel.
+    const packagingIds = new Set(
+      DEFAULT_INGREDIENTS.filter((i) => i.isPackaging).map((i) => i.id),
+    );
+    await tx
+      .table("ingredients")
+      .toCollection()
+      .modify((ingredient: { id: string; isPackaging?: boolean }) => {
+        if (ingredient.isPackaging === undefined) {
+          ingredient.isPackaging = packagingIds.has(ingredient.id);
+        }
+      });
+  });
+
 const DEFAULT_MENU: readonly MenuItemRecord[] = [
   { id: "usucha", name: "Usucha", priceSatang: 8_000, sortOrder: 0, soldOut: false },
   { id: "iced-matcha", name: "Iced Matcha", priceSatang: 8_000, sortOrder: 1, soldOut: false },
@@ -216,18 +322,23 @@ const DEFAULT_MENU: readonly MenuItemRecord[] = [
  * truth from the very first row rather than from the first sale.
  */
 const DEFAULT_INGREDIENTS: readonly IngredientRecord[] = [
-  { id: "matcha", name: "Matcha", unit: "g", onHand: 0, reorderPoint: 20_000, costPerUnit: 2_000_000, sortOrder: 0 },
-  { id: "hojicha-leaf", name: "Hojicha leaf", unit: "g", onHand: 0, reorderPoint: 30_000, costPerUnit: 600_000, sortOrder: 1 },
-  { id: "milk", name: "Milk", unit: "ml", onHand: 0, reorderPoint: 1_000_000, costPerUnit: 5_000, sortOrder: 2 },
-  { id: "cup", name: "Cup", unit: "piece", onHand: 0, reorderPoint: 20_000, costPerUnit: 200_000, sortOrder: 3 },
+  { id: "matcha", name: "Matcha", unit: "g", onHand: 0, reorderPoint: 20_000, costPerUnit: 2_000_000, sortOrder: 0, isPackaging: false },
+  { id: "hojicha-leaf", name: "Hojicha leaf", unit: "g", onHand: 0, reorderPoint: 30_000, costPerUnit: 600_000, sortOrder: 1, isPackaging: false },
+  { id: "milk", name: "Milk", unit: "ml", onHand: 0, reorderPoint: 1_000_000, costPerUnit: 5_000, sortOrder: 2, isPackaging: false },
+  { id: "cup", name: "Cup", unit: "piece", onHand: 0, reorderPoint: 20_000, costPerUnit: 200_000, sortOrder: 3, isPackaging: true },
+  // Delivery-only packaging, consumed via the channel recipe override.
+  { id: "lid", name: "Sealed lid", unit: "piece", onHand: 0, reorderPoint: 20_000, costPerUnit: 150_000, sortOrder: 4, isPackaging: true },
+  { id: "carrier-bag", name: "Carrier bag", unit: "piece", onHand: 0, reorderPoint: 20_000, costPerUnit: 300_000, sortOrder: 5, isPackaging: true },
 ];
 
-/** Opening stock, in milli-units: 200g matcha, 200g hojicha, 4L milk, 100 cups. */
+/** Opening stock, in milli-units. */
 const OPENING_STOCK: readonly (readonly [string, number])[] = [
   ["matcha", 200_000],
   ["hojicha-leaf", 200_000],
   ["milk", 4_000_000],
   ["cup", 100_000],
+  ["lid", 100_000],
+  ["carrier-bag", 100_000],
 ];
 
 /**
@@ -252,15 +363,85 @@ const DEFAULT_RECIPES: readonly RecipeLineRecord[] = [
   { id: "matcha-latte:cup:*", menuItemId: "matcha-latte", ingredientId: "cup", qty: 1_000, channelId: null },
 ];
 
+/**
+ * Channels, seeded from the domain constants so the stored contract terms
+ * start as the documented defaults rather than a second set of numbers that
+ * can drift from them.
+ *
+ * **Read your contract and edit these.** PLAN.md names trusting the defaults
+ * as this phase's risk: `gpBasis` and `gpAppliesTo` encode the harsher
+ * reading — commission on the VAT-inclusive list price, charged before any
+ * merchant-funded discount — and the difference is material.
+ */
+const DEFAULT_CHANNELS: readonly ChannelRecord[] = [
+  { ...WALK_IN, sortOrder: 0 },
+  { ...GRAB, sortOrder: 1 },
+];
+
+/**
+ * Delivery list prices. Marked up over the counter to absorb 30% commission —
+ * and still worth checking against the break-even tool on the Day screen,
+ * because "marked up" and "actually profitable" are not the same claim.
+ */
+const DEFAULT_CHANNEL_PRICES: readonly ChannelPriceRecord[] = [
+  { id: "GRAB:usucha", menuItemId: "usucha", channelId: GRAB.id, priceSatang: 11_500, validFrom: "2026-01-01T00:00:00+07:00", validTo: null },
+  { id: "GRAB:iced-matcha", menuItemId: "iced-matcha", channelId: GRAB.id, priceSatang: 11_500, validFrom: "2026-01-01T00:00:00+07:00", validTo: null },
+  { id: "GRAB:hojicha", menuItemId: "hojicha", channelId: GRAB.id, priceSatang: 10_900, validFrom: "2026-01-01T00:00:00+07:00", validTo: null },
+  { id: "GRAB:matcha-latte", menuItemId: "matcha-latte", channelId: GRAB.id, priceSatang: 12_900, validFrom: "2026-01-01T00:00:00+07:00", validTo: null },
+];
+
+/**
+ * Delivery packaging, via the channel-scoped recipe override that
+ * `stock/recipe.ts` already implements: a lid is *added* on Grab because it
+ * has no base line, and the cup is *replaced* with a sealed one at a higher
+ * count. Counter orders are untouched, so delivery packaging never pollutes
+ * walk-in COGS.
+ */
+const DELIVERY_RECIPES: readonly RecipeLineRecord[] = [
+  { id: "usucha:lid:GRAB", menuItemId: "usucha", ingredientId: "lid", qty: 1_000, channelId: GRAB.id },
+  { id: "iced-matcha:lid:GRAB", menuItemId: "iced-matcha", ingredientId: "lid", qty: 1_000, channelId: GRAB.id },
+  { id: "hojicha:lid:GRAB", menuItemId: "hojicha", ingredientId: "lid", qty: 1_000, channelId: GRAB.id },
+  { id: "matcha-latte:lid:GRAB", menuItemId: "matcha-latte", ingredientId: "lid", qty: 1_000, channelId: GRAB.id },
+  { id: "matcha-latte:bag:GRAB", menuItemId: "matcha-latte", ingredientId: "carrier-bag", qty: 1_000, channelId: GRAB.id },
+  { id: "usucha:bag:GRAB", menuItemId: "usucha", ingredientId: "carrier-bag", qty: 1_000, channelId: GRAB.id },
+  { id: "iced-matcha:bag:GRAB", menuItemId: "iced-matcha", ingredientId: "carrier-bag", qty: 1_000, channelId: GRAB.id },
+  { id: "hojicha:bag:GRAB", menuItemId: "hojicha", ingredientId: "carrier-bag", qty: 1_000, channelId: GRAB.id },
+];
+
+/**
+ * Add only the rows whose id is not already present, and report which landed.
+ *
+ * An all-or-nothing `count() === 0` guard is wrong for reference data: it
+ * makes seeding a one-time event, so every row a later phase adds — a delivery
+ * recipe, a new packaging ingredient — silently never reaches an install that
+ * was seeded before that phase existed. Adding per row is additive and leaves
+ * any operator edits to existing rows untouched.
+ */
+async function addMissing<T extends { readonly id: string }>(
+  table: EntityTable<T, "id">,
+  rows: readonly T[],
+): Promise<readonly T[]> {
+  const existing = new Set<string>(
+    (await table.toCollection().primaryKeys()) as unknown as string[],
+  );
+  const missing = rows.filter((row) => !existing.has(row.id));
+  if (missing.length > 0) await table.bulkAdd(missing as T[]);
+  return missing;
+}
+
 /** Seed a fresh install with a starter menu, ingredients, recipes, and device config. Idempotent. */
 export async function seedIfEmpty(): Promise<void> {
   await db.transaction(
     "rw",
-    db.menu_items,
-    db.device_config,
-    db.ingredients,
-    db.recipe_lines,
-    db.stock_movements,
+    [
+      db.menu_items,
+      db.device_config,
+      db.ingredients,
+      db.recipe_lines,
+      db.stock_movements,
+      db.channels,
+      db.channel_prices,
+    ],
     async () => {
       if ((await db.menu_items.count()) === 0) {
         await db.menu_items.bulkAdd(DEFAULT_MENU);
@@ -274,28 +455,36 @@ export async function seedIfEmpty(): Promise<void> {
           ownerPin: "1234",
         });
       }
-      if ((await db.recipe_lines.count()) === 0) {
-        await db.recipe_lines.bulkAdd(DEFAULT_RECIPES);
-      }
-      if ((await db.ingredients.count()) === 0) {
-        const at = new Date().toISOString();
-        await db.ingredients.bulkAdd(
-          DEFAULT_INGREDIENTS.map((ingredient) => {
-            const opening = OPENING_STOCK.find(([id]) => id === ingredient.id)?.[1] ?? 0;
-            return { ...ingredient, onHand: opening };
-          }),
-        );
+      // Reference data is seeded per row, so rows introduced by a later phase
+      // still reach an install seeded before that phase existed.
+      await addMissing(db.recipe_lines, [...DEFAULT_RECIPES, ...DELIVERY_RECIPES]);
+      await addMissing(db.channels, DEFAULT_CHANNELS);
+      await addMissing(db.channel_prices, DEFAULT_CHANNEL_PRICES);
+
+      const at = new Date().toISOString();
+      const newIngredients = await addMissing(
+        db.ingredients,
+        DEFAULT_INGREDIENTS.map((ingredient) => ({
+          ...ingredient,
+          onHand: OPENING_STOCK.find(([id]) => id === ingredient.id)?.[1] ?? 0,
+        })),
+      );
+      // Opening stock is a real PURCHASE movement, so the ledger stays the
+      // source of truth even for ingredients that arrive in a later phase.
+      if (newIngredients.length > 0) {
         await db.stock_movements.bulkAdd(
-          OPENING_STOCK.map(([ingredientId, qty]) => ({
-            id: `opening-${ingredientId}`,
-            ingredientId,
-            kind: "PURCHASE" as const,
-            delta: qty,
-            at,
-            saleId: null,
-            wasteReason: null,
-            note: "Opening stock — replace with a real count",
-          })),
+          newIngredients
+            .filter((ingredient) => ingredient.onHand !== 0)
+            .map((ingredient) => ({
+              id: `opening-${ingredient.id}`,
+              ingredientId: ingredient.id,
+              kind: "PURCHASE" as const,
+              delta: ingredient.onHand,
+              at,
+              saleId: null,
+              wasteReason: null,
+              note: "Opening stock — replace with a real count",
+            })),
         );
       }
     },
