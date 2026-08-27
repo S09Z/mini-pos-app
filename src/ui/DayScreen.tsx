@@ -163,10 +163,129 @@ export function DayScreen({
             </section>
           )}
 
+          <ChannelSection view={view} />
+
           <VoidSection view={view} audit={audit} />
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Contribution by channel, and the answer to "should I raise my Grab price".
+ *
+ * Sorted by contribution because PLAN.md says so twice: delivery volume can
+ * grow while profit shrinks, and a revenue-sorted table hides exactly that.
+ */
+function ChannelSection({ view }: { view: DayView }) {
+  const { byChannel, pricingAnswers } = view;
+  if (byChannel.length === 0) return null;
+
+  const deliveryAnswers = pricingAnswers.filter((a) => !a.alreadyClears);
+
+  return (
+    <section className="border-t border-rule pt-4">
+      <h3 className="mb-2 text-13 tracking-wide opacity-60">
+        BY CHANNEL — sorted by contribution, not revenue
+      </h3>
+
+      <table className="w-full text-13 font-mono">
+        <thead>
+          <tr className="border-b border-rule text-left opacity-60">
+            <th className="py-1">Channel</th>
+            <th className="py-1 text-right">Orders</th>
+            <th className="py-1 text-right">Customer paid</th>
+            <th className="py-1 text-right">Commission</th>
+            <th className="py-1 text-right">Payout</th>
+            <th className="py-1 text-right">Contribution</th>
+            <th className="py-1 text-right">Per order</th>
+          </tr>
+        </thead>
+        <tbody>
+          {byChannel.map((channel) => (
+            <tr key={channel.channelId} className="border-b border-rule">
+              <td className="py-1">{channel.channelName}</td>
+              <td className="py-1 text-right tabular-nums">{channel.saleCount}</td>
+              <td className="py-1 text-right tabular-nums">
+                {formatTHB(channel.customerPaid, { symbol: false })}
+              </td>
+              <td className="py-1 text-right tabular-nums">
+                {channel.gpAmount === 0 ? "—" : formatTHB(channel.gpAmount, { symbol: false })}
+              </td>
+              <td className="py-1 text-right tabular-nums">
+                {formatTHB(channel.netPayout, { symbol: false })}
+              </td>
+              <td className="py-1 text-right tabular-nums">
+                {channel.costComplete ? formatTHB(channel.contribution, { symbol: false }) : "—"}
+              </td>
+              <td className="py-1 text-right tabular-nums">
+                {channel.costComplete
+                  ? formatTHB(channel.contributionPerSale, { symbol: false })
+                  : "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {/* PLAN.md names trusting these defaults as this phase's risk, so the
+          reading is stated rather than assumed. */}
+      {byChannel.some((c) => c.gpRateBp > 0) && (
+        <p className="mt-2 rounded-[4pt] bg-kincha px-2 py-1 text-11 text-paper">
+          Commission computed on the{" "}
+          {byChannel.find((c) => c.gpRateBp > 0)?.gpBasis === "GROSS" ? "VAT-inclusive" : "ex-VAT"}{" "}
+          {byChannel.find((c) => c.gpRateBp > 0)?.gpAppliesTo === "LIST_PRICE"
+            ? "list price, before merchant-funded discounts"
+            : "discounted price"}
+          . That is a reading of your contract, not a fact — check it.
+        </p>
+      )}
+
+      {deliveryAnswers.length > 0 && (
+        <>
+          <h3 className="mb-2 mt-6 text-13 tracking-wide opacity-60">
+            PRICING — what delivery must list at to match the counter
+          </h3>
+          <table className="w-full text-13 font-mono">
+            <thead>
+              <tr className="border-b border-rule text-left opacity-60">
+                <th className="py-1">Item</th>
+                <th className="py-1">Channel</th>
+                <th className="py-1 text-right">Listed at</th>
+                <th className="py-1 text-right">Break even</th>
+                <th className="py-1 text-right">Raise by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deliveryAnswers.map((answer) => (
+                <tr key={`${answer.channelId}:${answer.menuItemId}`} className="border-b border-rule">
+                  <td className="py-1">{answer.menuItemName}</td>
+                  <td className="py-1">{answer.channelName}</td>
+                  <td className="py-1 text-right tabular-nums">
+                    {formatTHB(answer.currentListPrice, { symbol: false })}
+                  </td>
+                  <td className="py-1 text-right tabular-nums">
+                    {answer.breakEvenListPrice === null
+                      ? "unreachable"
+                      : formatTHB(answer.breakEvenListPrice, { symbol: false })}
+                  </td>
+                  <td className="py-1 text-right tabular-nums text-beni">
+                    {answer.shortfall === null
+                      ? "—"
+                      : `+${formatTHB(answer.shortfall, { symbol: false })}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-2 text-11 opacity-60">
+            Break-even is the list price at which a delivery order contributes as much as the same
+            drink sold at the counter. Items already clearing that bar are not listed.
+          </p>
+        </>
+      )}
+    </section>
   );
 }
 

@@ -73,14 +73,20 @@ export async function applyMovements(drafts: readonly MovementDraft[]): Promise<
   });
 }
 
-/** Deplete a cart's ingredients. Called inside the checkout transaction. */
+/**
+ * Deplete a cart's ingredients. Called inside the checkout transaction.
+ *
+ * Resolved against the sale's channel, so a delivery order takes its sealed
+ * lid and carrier bag out of stock while a counter order does not.
+ */
 export async function depleteForSale(
   cart: readonly { readonly menuItemId: string; readonly qty: number }[],
   saleId: string,
   at: string,
+  channelId: string = WALK_IN.id,
 ): Promise<void> {
   const recipeLines = await db.recipe_lines.toArray();
-  const requirements = requirementsForCart(recipeLines, cart, WALK_IN.id);
+  const requirements = requirementsForCart(recipeLines, cart, channelId);
   await applyMovements(depletionDrafts(requirements, saleId, at));
 }
 

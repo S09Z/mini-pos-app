@@ -16,6 +16,9 @@ import { salesCsv, saleLinesCsv, daySummaryCsv } from "./day/csv.js";
 import { menuStockByItem } from "./stock/availability.js";
 import { quantity } from "./stock/units.js";
 import { stockStatus } from "./stock/ledger.js";
+import { priceListFor } from "./channel/pricing.js";
+import type { ChannelPrice } from "./channel/types.js";
+import { WALK_IN } from "./channel/types.js";
 import { satang, type Satang } from "./money.js";
 import { useLiveQuery } from "./ui/useLiveQuery.js";
 import { RailNav, type Tab } from "./ui/RailNav.js";
@@ -26,6 +29,7 @@ import { DoneScreen } from "./ui/DoneScreen.js";
 import { VoidDialog } from "./ui/VoidDialog.js";
 import { StockScreen, type StockActions } from "./ui/StockScreen.js";
 import { DayScreen, type DayActions } from "./ui/DayScreen.js";
+import { ChannelBar } from "./ui/ChannelBar.js";
 import { downloadText } from "./ui/download.js";
 
 type Screen = { name: "sell" } | { name: "tender" } | { name: "done"; sale: SaleRecord };
@@ -37,6 +41,10 @@ export function App() {
   const [screen, setScreen] = useState<Screen>({ name: "sell" });
   const [voiding, setVoiding] = useState<SaleRecord | null>(null);
   const [day, setDay] = useState(() => bangkokToday());
+  const [channelId, setChannelId] = useState<string>(WALK_IN.id);
+  const [platformOrderId, setPlatformOrderId] = useState("");
+  /** A refused checkout has to be visible; silently doing nothing is worse than the error. */
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
   useEffect(() => {
     seedIfEmpty()
@@ -50,6 +58,36 @@ export function App() {
   );
 
   const ingredients = useLiveQuery(() => (ready ? ingredientsSorted() : []), [ready]);
+  const channels = useLiveQuery(() => (ready ? db.channels.orderBy("sortOrder").toArray() : []), [ready]);
+
+  /**
+   * Prices resolved per channel, tagged with the channel they were computed
+   * for.
+   *
+   * The tag is load-bearing. `useLiveQuery` keeps the previous value while it
+   * re-reads, so for a moment after switching channels the map still holds
+   * counter prices — and a tap in that window would capture the counter price
+   * into the cart permanently. That is the exact failure the channel indicator
+   * exists to prevent, so the grid stays inert until the map catches up rather
+   * than trusting a race to resolve in time.
+   */
+  const priceList = useLiveQuery(async () => {
+    if (!ready) return null;
+    const [items, rows] = await Promise.all([
+      db.menu_items.orderBy("sortOrder").toArray(),
+      db.channel_prices.toArray(),
+    ]);
+    const domainPrices: ChannelPrice[] = rows.map((r) => ({
+      menuItemId: r.menuItemId,
+      channelId: r.channelId,
+      price: r.priceSatang as Satang,
+      validFrom: r.validFrom,
+      validTo: r.validTo,
+    }));
+    return { channelId, prices: priceListFor(domainPrices, items, channelId, new Date()) };
+  }, [ready, channelId]);
+
+  const pricesReady = priceList != null && priceList.channelId === channelId;
 
   // Re-reads whenever a movement lands, so depleting stock updates the tiles
   // without the sell screen knowing anything about the ledger.
@@ -76,6 +114,9 @@ export function App() {
     [cart],
   );
 
+  const activeChannel = channels?.find((c) => c.id === channelId);
+  const isDelivery = channelId !== WALK_IN.id;
+
   /** Surfaced on the rail so a low tin is visible from the sell screen. */
   const stockAlert = useMemo(() => {
     if (!ingredients) return undefined;
@@ -90,16 +131,14 @@ export function App() {
     return undefined;
   }, [ingredients]);
 
-  const addItem = useCallback((item: MenuItemRecord) => {
+  const addItem = useCallback((item: MenuItemRecord, price: Satang) => {
     setCart((prev) => {
       const existing = prev.find((l) => l.menuItemId === item.id);
       if (existing) {
         return prev.map((l) => (l.menuItemId === item.id ? { ...l, qty: l.qty + 1 } : l));
       }
-      return [
-        ...prev,
-        { menuItemId: item.id, name: item.name, unitPriceSatang: item.priceSatang as Satang, qty: 1 },
-      ];
+      // The channel's price, not the counter price — see channel/pricing.ts.
+      return [...prev, { menuItemId: item.id, name: item.name, unitPriceSatang: price, qty: 1 }];
     });
   }, []);
 
@@ -108,6 +147,7 @@ export function App() {
   }, []);
 
   const decrementLine = useCallback((menuItemId: string) => {
+    setCheckoutError(null);
     setCart((prev) =>
       prev
         .map((l) => (l.menuItemId === menuItemId ? { ...l, qty: l.qty - 1 } : l))
@@ -174,13 +214,36 @@ export function App() {
     [day],
   );
 
+  async function handleRecordDeliveryOrder() {
+    setCheckoutError(null);
+    try {
+      const { sale } = await checkout(cart, total, {
+        channelId,
+        platformOrderId: platformOrderId.trim(),
+      });
+      setScreen({ name: "done", sale });
+    } catch (err) {
+      setCheckoutError(err instanceof Error ? err.message : "Could not record that order");
+    }
+  }
+
   async function handleConfirmTender(tendered: Satang) {
-    const { sale } = await checkout(cart, tendered);
-    setScreen({ name: "done", sale });
+    setCheckoutError(null);
+    try {
+      const { sale } = await checkout(cart, tendered, {
+        channelId,
+        ...(platformOrderId.trim() === "" ? {} : { platformOrderId: platformOrderId.trim() }),
+      });
+      setScreen({ name: "done", sale });
+    } catch (err) {
+      setCheckoutError(err instanceof Error ? err.message : "Could not complete that sale");
+      setScreen({ name: "sell" });
+    }
   }
 
   function handleNewSale() {
     setCart([]);
+    setPlatformOrderId("");
     setScreen({ name: "sell" });
   }
 
@@ -223,20 +286,45 @@ export function App() {
         ))}
 
       {tab === "sell" && screen.name === "sell" && (
-        <>
-          <MenuGrid
-            items={menuItems}
-            stock={stockView?.byItem ?? new Map()}
-            ingredientNames={stockView?.names ?? new Map()}
-            onSelect={addItem}
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <ChannelBar
+            channels={channels ?? []}
+            activeId={channelId}
+            onSelect={setChannelId}
+            platformOrderId={platformOrderId}
+            onPlatformOrderIdChange={setPlatformOrderId}
+            locked={cart.length > 0}
           />
-          <Ticket
-            cart={cart}
-            onIncrement={incrementLine}
-            onDecrement={decrementLine}
-            onCharge={() => setScreen({ name: "tender" })}
-          />
-        </>
+          <div className="flex flex-1 overflow-hidden">
+            <MenuGrid
+              items={menuItems}
+              stock={stockView?.byItem ?? new Map()}
+              prices={pricesReady ? priceList.prices : new Map()}
+              ingredientNames={stockView?.names ?? new Map()}
+              onSelect={addItem}
+              warnOnCounterPrice={isDelivery}
+              disabled={!pricesReady}
+            />
+            <Ticket
+              cart={cart}
+              onIncrement={incrementLine}
+              onDecrement={decrementLine}
+              onCharge={() => {
+                // Delivery is already paid for at the platform; there is no
+                // cash to count, so it books straight through.
+                if (isDelivery) void handleRecordDeliveryOrder();
+                else setScreen({ name: "tender" });
+              }}
+              isDelivery={isDelivery}
+              {...(activeChannel ? { channelName: activeChannel.name } : {})}
+              {...(checkoutError !== null
+                ? { blockedReason: checkoutError }
+                : isDelivery && platformOrderId.trim() === ""
+                  ? { blockedReason: "Enter the platform order number before recording this order." }
+                  : {})}
+            />
+          </div>
+        </div>
       )}
 
       {tab === "sell" && screen.name === "tender" && (
