@@ -218,6 +218,64 @@ export interface PlatformFeeRecord {
   readonly payoutBatchId: string | null;
 }
 
+/**
+ * One imported statement and the deposit it corresponds to.
+ *
+ * Append-only, like everything else that records a discrepancy. Re-importing a
+ * corrected statement creates a new batch rather than editing this one, so the
+ * history of what the platform claimed and when stays intact.
+ */
+export interface PayoutBatchRecord {
+  readonly id: string;
+  readonly channelId: string;
+  readonly importedAt: string;
+  readonly fileName: string;
+  /** Statement rows read, before matching. */
+  readonly rowCount: number;
+  readonly statementTotalSatang: number;
+  readonly expectedTotalSatang: number;
+  /** What actually reached the bank. Null until the operator enters it. */
+  readonly depositSatang: number | null;
+  readonly note: string;
+}
+
+/** A statement row as imported, with its original cells kept for investigation. */
+export interface StatementRowRecord {
+  readonly id: string;
+  readonly batchId: string;
+  readonly platformOrderId: string;
+  readonly netPayoutSatang: number;
+  readonly grossSatang: number | null;
+  readonly commissionSatang: number | null;
+  /** Funded by the platform, not us — kept apart from merchantFundedDiscount. */
+  readonly platformFundedDiscountSatang: number | null;
+  readonly merchantFundedDiscountSatang: number | null;
+  readonly orderDate: string | null;
+  readonly status: string | null;
+  readonly lineNumber: number;
+  readonly raw: Readonly<Record<string, string>>;
+}
+
+/**
+ * An unmatched or mismatched row. PLAN.md: these are the finding, not the mess.
+ *
+ * `reason` stays null until someone works the queue. Resolving attaches an
+ * explanation and never alters `varianceSatang` — a reconciliation that
+ * reached zero by editing the numbers would prove nothing.
+ */
+export interface PayoutExceptionRecord {
+  readonly id: string;
+  readonly batchId: string;
+  readonly kind: string;
+  readonly platformOrderId: string;
+  readonly varianceSatang: number;
+  readonly saleId: string | null;
+  readonly detail: string;
+  readonly reason: string | null;
+  readonly note: string;
+  readonly resolvedAt: string | null;
+}
+
 export const db = new Dexie("mini-pos-app") as Dexie & {
   menu_items: EntityTable<MenuItemRecord, "id">;
   sales: EntityTable<SaleRecord, "id">;
@@ -231,6 +289,9 @@ export const db = new Dexie("mini-pos-app") as Dexie & {
   channels: EntityTable<ChannelRecord, "id">;
   channel_prices: EntityTable<ChannelPriceRecord, "id">;
   platform_fees: EntityTable<PlatformFeeRecord, "saleId">;
+  payout_batches: EntityTable<PayoutBatchRecord, "id">;
+  statement_rows: EntityTable<StatementRowRecord, "id">;
+  payout_exceptions: EntityTable<PayoutExceptionRecord, "id">;
 };
 
 db.version(1).stores({
@@ -308,6 +369,15 @@ db.version(4)
         }
       });
   });
+
+// v5 — Phase 5 payout reconciliation. Purely additive; nothing existing needs
+// backfilling, because an unsettled sale is exactly what `payoutBatchId: null`
+// already meant.
+db.version(5).stores({
+  payout_batches: "id, channelId, importedAt",
+  statement_rows: "id, batchId, platformOrderId",
+  payout_exceptions: "id, batchId, kind, platformOrderId, reason",
+});
 
 const DEFAULT_MENU: readonly MenuItemRecord[] = [
   { id: "usucha", name: "Usucha", priceSatang: 8_000, sortOrder: 0, soldOut: false },
